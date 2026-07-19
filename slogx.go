@@ -72,7 +72,19 @@ func ModeFromEnv(name string) Mode {
 // in-request logs correlate with their Cloud Run request trace. An empty
 // projectID degrades gracefully: logs are still emitted, just without the trace
 // field. In [Plain] mode the projectID argument is unused.
-func Setup(mode Mode, projectID string) {
+//
+// In [Structured] mode, records at or above the reporting threshold (default
+// [slog.LevelError]) are also enriched for Cloud Error Reporting, so they surface
+// as grouped, alertable errors. This is on by default where it makes sense and
+// automatically off in [Plain] mode. Tune it with [WithReportThreshold],
+// [WithServiceContext] and [WithoutErrorReporting]; opt a single record out with
+// the [NoReport] marker.
+func Setup(mode Mode, projectID string, opts ...Option) {
+	cfg := config{reportThreshold: slog.LevelError}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	switch mode {
 	case Plain:
 		slog.SetDefault(slog.New(newPlainTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -80,10 +92,69 @@ func Setup(mode Mode, projectID string) {
 			Level:     slog.LevelDebug,
 		}, isTerminal(os.Stdout))))
 	default:
-		slog.SetDefault(slog.New(&traceHandler{root: newStructuredHandler(os.Stdout), projectID: projectID}))
+		var handler slog.Handler = &traceHandler{root: newStructuredHandler(os.Stdout), projectID: projectID}
+		if !cfg.errorReportingDisabled {
+			service, version := cfg.resolveServiceContext()
+			handler = &errorReportingHandler{
+				root:      handler,
+				threshold: cfg.reportThreshold,
+				service:   service,
+				version:   version,
+			}
+		}
+		slog.SetDefault(slog.New(handler))
 	}
 
 	slog.Info("Logger setup complete", "mode", mode.String())
+}
+
+// Option configures [Setup]. Options are ignored in [Plain] mode, where Error
+// Reporting enrichment never runs.
+type Option func(*config)
+
+// config holds the resolved [Setup] options.
+type config struct {
+	reportThreshold        slog.Level
+	service                string
+	version                string
+	serviceContextSet      bool
+	errorReportingDisabled bool
+}
+
+// resolveServiceContext returns the service name and version for the Error
+// Reporting serviceContext. An explicit [WithServiceContext] wins; otherwise it
+// falls back to Cloud Run's K_SERVICE / K_REVISION, degrading gracefully to
+// service-only or empty when they are unset.
+func (c config) resolveServiceContext() (service, version string) {
+	if c.serviceContextSet {
+		return c.service, c.version
+	}
+	return os.Getenv("K_SERVICE"), os.Getenv("K_REVISION")
+}
+
+// WithReportThreshold sets the minimum level at which records are enriched for
+// Cloud Error Reporting. It defaults to [slog.LevelError]; raise it to
+// [LevelCritical] to report only critical records, for example.
+func WithReportThreshold(level slog.Level) Option {
+	return func(c *config) { c.reportThreshold = level }
+}
+
+// WithServiceContext overrides the Error Reporting serviceContext, which
+// otherwise resolves from Cloud Run's K_SERVICE / K_REVISION environment
+// variables. Use it when those are unset or wrong for your deployment.
+func WithServiceContext(service, version string) Option {
+	return func(c *config) {
+		c.service = service
+		c.version = version
+		c.serviceContextSet = true
+	}
+}
+
+// WithoutErrorReporting disables Cloud Error Reporting enrichment entirely, even
+// in [Structured] mode. Records are still emitted to Cloud Logging with their
+// severity; they just do not surface as grouped Error Reporting events.
+func WithoutErrorReporting() Option {
+	return func(c *config) { c.errorReportingDisabled = true }
 }
 
 // newStructuredHandler builds the Cloud Logging JSON handler: it renames slog's

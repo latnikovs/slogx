@@ -97,6 +97,43 @@ renders as Cloud Logging's `CRITICAL` severity:
 slog.LogAttrs(ctx, slogx.LevelCritical, "data loss detected")
 ```
 
+### Error Reporting
+
+In `Structured` mode, records at or above the reporting threshold (default
+`slog.LevelError`) are automatically enriched so they surface in
+[Cloud Error Reporting](https://cloud.google.com/error-reporting) — grouped,
+counted and alertable — not just in the Logs Explorer. Each qualifying record
+gets the `ReportedErrorEvent` `@type`, a `serviceContext` object, and a
+synthesized `stack_trace` (when it carries none). This is **on by default**
+where it makes sense and automatically **off** in `Plain` mode — no per-service
+flag to remember.
+
+```go
+slogx.Setup(slogx.Structured, "my-gcp-project") // Error Reporting on by default
+
+slog.ErrorContext(ctx, "charge failed", "order", id) // → grouped in Error Reporting
+```
+
+`serviceContext` resolves `service`/`version` from Cloud Run's `K_SERVICE` /
+`K_REVISION`, degrading gracefully when they are unset. Tune the behaviour with
+functional options (the two-argument `Setup` call keeps working unchanged):
+
+```go
+slogx.Setup(slogx.Structured, "my-gcp-project",
+    slogx.WithReportThreshold(slogx.LevelCritical), // report only critical records
+    slogx.WithServiceContext("checkout", "v1.4.0"), // override K_SERVICE/K_REVISION
+    slogx.WithoutErrorReporting(),                  // rare full opt-out
+)
+```
+
+Opt a single, known-noisy record out with the `slogx.NoReport` marker — it logs
+at its normal level but never spawns an Error Reporting group, and the marker
+itself is stripped from the output:
+
+```go
+slog.Error("expected upstream 429, retrying", slogx.NoReport)
+```
+
 ## Versioning
 
 Semantic versioning via git tags. `go get` fetches tagged releases directly —

@@ -3,7 +3,7 @@ base_branch: main
 
 labels:
   bug: bug
-  feature: enhancement
+  feature: feature
   chore: chore
 
 commands:

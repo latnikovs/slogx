@@ -1,0 +1,12 @@
+# Config for the `ship` skill — github.com/latnikovs/slogx
+base_branch: main
+
+labels:
+  bug: bug
+  feature: enhancement
+  chore: chore
+
+commands:
+  test_one: go test -run
+  test_all: go test ./...
+  format: gofmt -w

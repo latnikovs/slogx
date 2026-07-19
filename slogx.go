@@ -234,6 +234,7 @@ func (h *traceHandler) Handle(ctx context.Context, record slog.Record) error {
 	if info, ok := TraceFromContext(ctx); ok && h.projectID != "" && info.TraceID != "" {
 		fields := []slog.Attr{
 			slog.String("logging.googleapis.com/trace", "projects/"+h.projectID+"/traces/"+info.TraceID),
+			slog.Bool("logging.googleapis.com/trace_sampled", info.Sampled),
 		}
 		if info.SpanID != "" {
 			fields = append(fields, slog.String("logging.googleapis.com/spanId", info.SpanID))

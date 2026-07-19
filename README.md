@@ -88,6 +88,25 @@ r = r.WithContext(ctx)
 slog.InfoContext(r.Context(), "handled request")
 ```
 
+The `slogx/tracehttp` subpackage does the inbound half for you — parse the
+Cloud Run header and populate the context in one middleware:
+
+```go
+import "github.com/latnikovs/slogx/tracehttp"
+
+mux := http.NewServeMux()
+// ...
+handler := tracehttp.Middleware()(mux)
+```
+
+It parses `X-Cloud-Trace-Context` (`TRACE_ID/SPAN_ID;o=1`), converts the span to
+the hex form Cloud Logging expects, and stores the trace via
+`slogx.ContextWithTraceInfo` — so downstream logs emit
+`logging.googleapis.com/trace`, `spanId`, and `trace_sampled`. A missing or
+malformed header is not an error: the request passes through with no trace.
+`ParseCloudTraceHeader` is exported for reuse. The core `slogx` package imports
+no `net/http`; HTTP lives only in this subpackage.
+
 ### Critical severity
 
 `slogx.LevelCritical` is a level above `slog.LevelError`; in production it

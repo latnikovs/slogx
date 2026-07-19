@@ -34,6 +34,52 @@ func TestTraceHandlerInjectsTraceFieldsFromContext(t *testing.T) {
 	}
 }
 
+func TestTraceHandlerEmitsSampledFlag(t *testing.T) {
+	cases := []struct {
+		name    string
+		sampled bool
+		want    string
+	}{
+		{name: "sampled", sampled: true, want: `"logging.googleapis.com/trace_sampled":true`},
+		{name: "not sampled", sampled: false, want: `"logging.googleapis.com/trace_sampled":false`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "olens-lv"}
+
+			ctx := ContextWithTraceInfo(context.Background(), TraceInfo{
+				TraceID: "105445aa7843bc8bf206b12000100000",
+				SpanID:  "0000000000000001",
+				Sampled: tc.sampled,
+			})
+			record := slog.NewRecord(time.Date(2026, 5, 17, 12, 30, 0, 0, time.UTC), slog.LevelInfo, "msg", 0)
+			if err := handler.Handle(ctx, record); err != nil {
+				t.Fatalf("Handle() error = %v", err)
+			}
+
+			if !strings.Contains(buf.String(), tc.want) {
+				t.Fatalf("output %q does not contain %q", buf.String(), tc.want)
+			}
+		})
+	}
+}
+
+func TestTraceHandlerNoSampledFlagWithoutTrace(t *testing.T) {
+	var buf bytes.Buffer
+	handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "olens-lv"}
+
+	record := slog.NewRecord(time.Date(2026, 5, 17, 12, 30, 0, 0, time.UTC), slog.LevelInfo, "msg", 0)
+	if err := handler.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+
+	if strings.Contains(buf.String(), "logging.googleapis.com/trace_sampled") {
+		t.Fatalf("output %q contains trace_sampled without a trace context", buf.String())
+	}
+}
+
 func TestTraceHandlerOmitsSpanWhenAbsent(t *testing.T) {
 	var buf bytes.Buffer
 	handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "olens-lv"}

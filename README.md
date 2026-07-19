@@ -140,7 +140,7 @@ functional options (the two-argument `Setup` call keeps working unchanged):
 ```go
 slogx.Setup(slogx.Structured, "my-gcp-project",
     slogx.WithReportThreshold(slogx.LevelCritical), // report only critical records
-    slogx.WithServiceContext("checkout", "v1.4.0"), // override K_SERVICE/K_REVISION
+    slogx.WithServiceContext("example-service", "v1.4.0"), // override K_SERVICE/K_REVISION
     slogx.WithoutErrorReporting(),                  // rare full opt-out
 )
 ```

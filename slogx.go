@@ -68,7 +68,7 @@ func ModeFromEnv(name string) Mode {
 
 // Setup installs the process-wide slog default handler for the given mode. In
 // [Structured] mode it emits Cloud Logging JSON; projectID (the GCP project,
-// e.g. "olens-lv") is used to build the logging.googleapis.com/trace field so
+// e.g. "my-gcp-project") is used to build the logging.googleapis.com/trace field so
 // in-request logs correlate with their Cloud Run request trace. An empty
 // projectID degrades gracefully: logs are still emitted, just without the trace
 // field. In [Plain] mode the projectID argument is unused.

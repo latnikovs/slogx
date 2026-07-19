@@ -14,7 +14,7 @@ import (
 
 func TestTraceHandlerInjectsTraceFieldsFromContext(t *testing.T) {
 	var buf bytes.Buffer
-	handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "olens-lv"}
+	handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "example-project"}
 
 	ctx := ContextWithTrace(context.Background(), "105445aa7843bc8bf206b12000100000", "0000000000000001")
 	record := slog.NewRecord(time.Date(2026, 5, 17, 12, 30, 0, 0, time.UTC), slog.LevelInfo, "instructor updated", 0)
@@ -25,7 +25,7 @@ func TestTraceHandlerInjectsTraceFieldsFromContext(t *testing.T) {
 
 	output := buf.String()
 	for _, want := range []string{
-		`"logging.googleapis.com/trace":"projects/olens-lv/traces/105445aa7843bc8bf206b12000100000"`,
+		`"logging.googleapis.com/trace":"projects/example-project/traces/105445aa7843bc8bf206b12000100000"`,
 		`"logging.googleapis.com/spanId":"0000000000000001"`,
 	} {
 		if !strings.Contains(output, want) {
@@ -47,7 +47,7 @@ func TestTraceHandlerEmitsSampledFlag(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "olens-lv"}
+			handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "example-project"}
 
 			ctx := ContextWithTraceInfo(context.Background(), TraceInfo{
 				TraceID: "105445aa7843bc8bf206b12000100000",
@@ -68,7 +68,7 @@ func TestTraceHandlerEmitsSampledFlag(t *testing.T) {
 
 func TestTraceHandlerNoSampledFlagWithoutTrace(t *testing.T) {
 	var buf bytes.Buffer
-	handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "olens-lv"}
+	handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "example-project"}
 
 	record := slog.NewRecord(time.Date(2026, 5, 17, 12, 30, 0, 0, time.UTC), slog.LevelInfo, "msg", 0)
 	if err := handler.Handle(context.Background(), record); err != nil {
@@ -82,7 +82,7 @@ func TestTraceHandlerNoSampledFlagWithoutTrace(t *testing.T) {
 
 func TestTraceHandlerOmitsSpanWhenAbsent(t *testing.T) {
 	var buf bytes.Buffer
-	handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "olens-lv"}
+	handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "example-project"}
 
 	ctx := ContextWithTrace(context.Background(), "105445aa7843bc8bf206b12000100000", "")
 	record := slog.NewRecord(time.Date(2026, 5, 17, 12, 30, 0, 0, time.UTC), slog.LevelInfo, "msg", 0)
@@ -92,7 +92,7 @@ func TestTraceHandlerOmitsSpanWhenAbsent(t *testing.T) {
 	}
 
 	output := buf.String()
-	if !strings.Contains(output, `"logging.googleapis.com/trace":"projects/olens-lv/traces/105445aa7843bc8bf206b12000100000"`) {
+	if !strings.Contains(output, `"logging.googleapis.com/trace":"projects/example-project/traces/105445aa7843bc8bf206b12000100000"`) {
 		t.Fatalf("output %q missing trace field", output)
 	}
 	if strings.Contains(output, "logging.googleapis.com/spanId") {
@@ -102,7 +102,7 @@ func TestTraceHandlerOmitsSpanWhenAbsent(t *testing.T) {
 
 func TestTraceHandlerNoTraceInContext(t *testing.T) {
 	var buf bytes.Buffer
-	handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "olens-lv"}
+	handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "example-project"}
 
 	record := slog.NewRecord(time.Date(2026, 5, 17, 12, 30, 0, 0, time.UTC), slog.LevelInfo, "msg", 0)
 	if err := handler.Handle(context.Background(), record); err != nil {
@@ -166,7 +166,7 @@ func TestStructuredSeverityMapping(t *testing.T) {
 
 func TestTraceFieldsStayTopLevelUnderGroup(t *testing.T) {
 	var buf bytes.Buffer
-	base := &traceHandler{root: newStructuredHandler(&buf), projectID: "olens-lv"}
+	base := &traceHandler{root: newStructuredHandler(&buf), projectID: "example-project"}
 
 	// Log through a grouped logger, the case that used to nest the trace fields.
 	grouped := base.WithGroup("req").WithAttrs([]slog.Attr{slog.String("path", "/lv")})
@@ -184,7 +184,7 @@ func TestTraceFieldsStayTopLevelUnderGroup(t *testing.T) {
 	}
 
 	// Trace/span must be top-level keys, not nested under the "req" group.
-	if entry["logging.googleapis.com/trace"] != "projects/olens-lv/traces/105445aa7843bc8bf206b12000100000" {
+	if entry["logging.googleapis.com/trace"] != "projects/example-project/traces/105445aa7843bc8bf206b12000100000" {
 		t.Fatalf("trace field not at top level: %v", entry)
 	}
 	if entry["logging.googleapis.com/spanId"] != "0000000000000001" {

@@ -14,7 +14,7 @@ import (
 // so tests exercise the real composition rather than the handler in isolation.
 func newErrorReportingChain(buf *bytes.Buffer, threshold slog.Level, service, version string) slog.Handler {
 	return &errorReportingHandler{
-		root:      &traceHandler{root: newStructuredHandler(buf), projectID: "olens-lv"},
+		root:      &traceHandler{root: newStructuredHandler(buf), projectID: "example-project"},
 		threshold: threshold,
 		service:   service,
 		version:   version,
@@ -39,7 +39,7 @@ func recordAt(level slog.Level, msg string, attrs ...slog.Attr) slog.Record {
 
 func TestErrorReportingEnrichesAtThreshold(t *testing.T) {
 	var buf bytes.Buffer
-	handler := newErrorReportingChain(&buf, slog.LevelError, "olens", "v1.2.3")
+	handler := newErrorReportingChain(&buf, slog.LevelError, "example-service", "v1.2.3")
 
 	if err := handler.Handle(context.Background(), recordAt(slog.LevelError, "db write failed")); err != nil {
 		t.Fatalf("Handle() error = %v", err)
@@ -53,8 +53,8 @@ func TestErrorReportingEnrichesAtThreshold(t *testing.T) {
 	if !ok {
 		t.Fatalf("serviceContext missing or not an object: %v", entry)
 	}
-	if svc["service"] != "olens" || svc["version"] != "v1.2.3" {
-		t.Fatalf("serviceContext = %v, want service=olens version=v1.2.3", svc)
+	if svc["service"] != "example-service" || svc["version"] != "v1.2.3" {
+		t.Fatalf("serviceContext = %v, want service=example-service version=v1.2.3", svc)
 	}
 	if _, ok := entry["stack_trace"].(string); !ok {
 		t.Fatalf("stack_trace missing or not a string: %v", entry)
@@ -63,7 +63,7 @@ func TestErrorReportingEnrichesAtThreshold(t *testing.T) {
 
 func TestErrorReportingCriticalIsEnrichedAndMapped(t *testing.T) {
 	var buf bytes.Buffer
-	handler := newErrorReportingChain(&buf, slog.LevelError, "olens", "")
+	handler := newErrorReportingChain(&buf, slog.LevelError, "example-service", "")
 
 	if err := handler.Handle(context.Background(), recordAt(LevelCritical, "out of memory")); err != nil {
 		t.Fatalf("Handle() error = %v", err)
@@ -80,7 +80,7 @@ func TestErrorReportingCriticalIsEnrichedAndMapped(t *testing.T) {
 
 func TestErrorReportingBelowThresholdPassesThrough(t *testing.T) {
 	var buf bytes.Buffer
-	handler := newErrorReportingChain(&buf, slog.LevelError, "olens", "v1")
+	handler := newErrorReportingChain(&buf, slog.LevelError, "example-service", "v1")
 
 	if err := handler.Handle(context.Background(), recordAt(slog.LevelWarn, "slow query")); err != nil {
 		t.Fatalf("Handle() error = %v", err)
@@ -97,7 +97,7 @@ func TestErrorReportingBelowThresholdPassesThrough(t *testing.T) {
 func TestErrorReportingThresholdIsConfigurable(t *testing.T) {
 	var buf bytes.Buffer
 	// Only report at or above Critical: a plain Error must pass through unenriched.
-	handler := newErrorReportingChain(&buf, LevelCritical, "olens", "v1")
+	handler := newErrorReportingChain(&buf, LevelCritical, "example-service", "v1")
 
 	if err := handler.Handle(context.Background(), recordAt(slog.LevelError, "handled error")); err != nil {
 		t.Fatalf("Handle() error = %v", err)
@@ -110,7 +110,7 @@ func TestErrorReportingThresholdIsConfigurable(t *testing.T) {
 
 func TestErrorReportingNoReportMarkerSuppressesAndStrips(t *testing.T) {
 	var buf bytes.Buffer
-	handler := newErrorReportingChain(&buf, slog.LevelError, "olens", "v1")
+	handler := newErrorReportingChain(&buf, slog.LevelError, "example-service", "v1")
 
 	record := recordAt(slog.LevelError, "expected upstream 429", NoReport, slog.String("code", "429"))
 	if err := handler.Handle(context.Background(), record); err != nil {
@@ -133,7 +133,7 @@ func TestErrorReportingNoReportMarkerSuppressesAndStrips(t *testing.T) {
 
 func TestErrorReportingNoReportStrippedBelowThreshold(t *testing.T) {
 	var buf bytes.Buffer
-	handler := newErrorReportingChain(&buf, slog.LevelError, "olens", "v1")
+	handler := newErrorReportingChain(&buf, slog.LevelError, "example-service", "v1")
 
 	record := recordAt(slog.LevelInfo, "cache miss", NoReport)
 	if err := handler.Handle(context.Background(), record); err != nil {
@@ -148,7 +148,7 @@ func TestErrorReportingNoReportStrippedBelowThreshold(t *testing.T) {
 func TestErrorReportingServiceContextDegradesGracefully(t *testing.T) {
 	// version unset -> service-only serviceContext.
 	var buf bytes.Buffer
-	handler := newErrorReportingChain(&buf, slog.LevelError, "olens", "")
+	handler := newErrorReportingChain(&buf, slog.LevelError, "example-service", "")
 	if err := handler.Handle(context.Background(), recordAt(slog.LevelError, "boom")); err != nil {
 		t.Fatalf("Handle() error = %v", err)
 	}
@@ -156,8 +156,8 @@ func TestErrorReportingServiceContextDegradesGracefully(t *testing.T) {
 	if !ok {
 		t.Fatalf("serviceContext missing: %s", buf.String())
 	}
-	if svc["service"] != "olens" {
-		t.Fatalf("serviceContext.service = %v, want olens", svc["service"])
+	if svc["service"] != "example-service" {
+		t.Fatalf("serviceContext.service = %v, want example-service", svc["service"])
 	}
 	if _, ok := svc["version"]; ok {
 		t.Fatalf("serviceContext.version present despite unset version: %v", svc)
@@ -181,7 +181,7 @@ func TestErrorReportingServiceContextDegradesGracefully(t *testing.T) {
 
 func TestErrorReportingKeepsFieldsTopLevelUnderGroup(t *testing.T) {
 	var buf bytes.Buffer
-	base := newErrorReportingChain(&buf, slog.LevelError, "olens", "v1")
+	base := newErrorReportingChain(&buf, slog.LevelError, "example-service", "v1")
 
 	grouped := base.WithGroup("req").WithAttrs([]slog.Attr{slog.String("path", "/lv")})
 	record := recordAt(slog.LevelError, "handler failed", slog.String("status", "500"))
@@ -207,9 +207,48 @@ func TestErrorReportingKeepsFieldsTopLevelUnderGroup(t *testing.T) {
 	}
 }
 
+func TestErrorReportingComposesWithTraceCorrelation(t *testing.T) {
+	// The real Structured-mode chain (errorReportingHandler -> traceHandler ->
+	// JSON) enriching an error record that also carries a trace context: both
+	// features must apply together, all at the JSON top level. Each feature was
+	// tested in isolation; this guards their composition.
+	var buf bytes.Buffer
+	handler := newErrorReportingChain(&buf, slog.LevelError, "example-service", "v1")
+
+	ctx := ContextWithTraceInfo(context.Background(), TraceInfo{
+		TraceID: "105445aa7843bc8bf206b12000100000",
+		SpanID:  "0000000000000001",
+		Sampled: true,
+	})
+	record := recordAt(slog.LevelError, "charge failed", slog.String("order", "42"))
+	if err := handler.Handle(ctx, record); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+
+	entry := decode(t, &buf)
+	wantTopLevel := map[string]any{
+		"@type":                                reportedErrorEventType,
+		"logging.googleapis.com/trace":         "projects/example-project/traces/105445aa7843bc8bf206b12000100000",
+		"logging.googleapis.com/spanId":        "0000000000000001",
+		"logging.googleapis.com/trace_sampled": true,
+		"order":                                "42",
+	}
+	for key, want := range wantTopLevel {
+		if entry[key] != want {
+			t.Errorf("entry[%q] = %v, want %v", key, entry[key], want)
+		}
+	}
+	if _, ok := entry["serviceContext"].(map[string]any); !ok {
+		t.Errorf("serviceContext missing or not an object: %v", entry)
+	}
+	if _, ok := entry["stack_trace"].(string); !ok {
+		t.Errorf("stack_trace missing or not a string: %v", entry)
+	}
+}
+
 func TestErrorReportingUsesExistingStackTrace(t *testing.T) {
 	var buf bytes.Buffer
-	handler := newErrorReportingChain(&buf, slog.LevelError, "olens", "v1")
+	handler := newErrorReportingChain(&buf, slog.LevelError, "example-service", "v1")
 
 	record := recordAt(slog.LevelError, "panic recovered", slog.String("stack_trace", "provided-stack"))
 	if err := handler.Handle(context.Background(), record); err != nil {

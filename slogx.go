@@ -21,6 +21,7 @@ package slogx
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -79,58 +80,122 @@ func Setup(mode Mode, projectID string) {
 			Level:     slog.LevelDebug,
 		}, true)))
 	default:
-		jsonHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-			AddSource: true,
-			Level:     slog.LevelInfo,
-			ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
-				switch attr.Key {
-				case slog.MessageKey:
-					attr.Key = "message"
-				case slog.SourceKey:
-					attr.Key = "logging.googleapis.com/sourceLocation"
-				case slog.LevelKey:
-					attr.Key = "severity"
-					if level, ok := attr.Value.Any().(slog.Level); ok && level == LevelCritical {
-						attr.Value = slog.StringValue("CRITICAL")
-					}
-				}
-				return attr
-			},
-		})
-		slog.SetDefault(slog.New(&traceHandler{inner: jsonHandler, projectID: projectID}))
+		slog.SetDefault(slog.New(&traceHandler{root: newStructuredHandler(os.Stdout), projectID: projectID}))
 	}
 
 	slog.Info("Logger setup complete", "mode", mode.String())
+}
+
+// newStructuredHandler builds the Cloud Logging JSON handler: it renames slog's
+// standard keys to the fields Cloud Logging recognizes and maps each level onto
+// a valid LogSeverity value.
+func newStructuredHandler(w io.Writer) slog.Handler {
+	return slog.NewJSONHandler(w, &slog.HandlerOptions{
+		AddSource:   true,
+		Level:       slog.LevelInfo,
+		ReplaceAttr: replaceForCloudLogging,
+	})
+}
+
+func replaceForCloudLogging(_ []string, attr slog.Attr) slog.Attr {
+	switch attr.Key {
+	case slog.MessageKey:
+		attr.Key = "message"
+	case slog.SourceKey:
+		attr.Key = "logging.googleapis.com/sourceLocation"
+	case slog.LevelKey:
+		attr.Key = "severity"
+		if level, ok := attr.Value.Any().(slog.Level); ok {
+			attr.Value = slog.StringValue(severityFor(level))
+		}
+	}
+	return attr
+}
+
+// severityFor maps a slog.Level onto Cloud Logging's LogSeverity enum names.
+// slog's own level strings do not all match: notably slog.LevelWarn stringifies
+// to "WARN", but Cloud Logging expects "WARNING" and treats any unrecognized
+// value as DEFAULT severity. Thresholds (rather than equality) also give
+// sensible names to custom in-between levels.
+func severityFor(level slog.Level) string {
+	switch {
+	case level >= LevelCritical:
+		return "CRITICAL"
+	case level >= slog.LevelError:
+		return "ERROR"
+	case level >= slog.LevelWarn:
+		return "WARNING"
+	case level >= slog.LevelInfo:
+		return "INFO"
+	default:
+		return "DEBUG"
+	}
 }
 
 // traceHandler wraps a JSON slog.Handler and, for records whose context carries
 // request trace information, injects the Cloud Logging special fields
 // logging.googleapis.com/trace and logging.googleapis.com/spanId so the entry
 // is grouped under its Cloud Run request trace in the Logs Explorer.
+//
+// Those special fields must sit at the JSON top level. Cloud Logging does not
+// read them when they are nested under a group, so the handler cannot simply add
+// them to the record and delegate to a grouped inner handler. Instead it records
+// the caller's WithGroup/WithAttrs operations and, in Handle, injects the trace
+// fields onto the ungrouped root first and replays the caller's operations on
+// top — keeping the trace fields top-level while user attributes still nest
+// under their groups.
 type traceHandler struct {
-	inner     slog.Handler
-	projectID string
+	root      slog.Handler                      // base handler, never grouped
+	projectID string                            // GCP project for the trace field
+	withOps   []func(slog.Handler) slog.Handler // caller WithGroup/WithAttrs, in order
 }
 
 func (h *traceHandler) Enabled(ctx context.Context, level slog.Level) bool {
-	return h.inner.Enabled(ctx, level)
+	return h.root.Enabled(ctx, level)
 }
 
 func (h *traceHandler) Handle(ctx context.Context, record slog.Record) error {
+	handler := h.root
+
+	// Inject the trace fields onto the ungrouped root before replaying the
+	// caller's operations, so they land at the top level rather than inside an
+	// open group.
 	if info, ok := TraceFromContext(ctx); ok && h.projectID != "" && info.TraceID != "" {
-		record = record.Clone()
-		record.AddAttrs(slog.String("logging.googleapis.com/trace", "projects/"+h.projectID+"/traces/"+info.TraceID))
-		if info.SpanID != "" {
-			record.AddAttrs(slog.String("logging.googleapis.com/spanId", info.SpanID))
+		fields := []slog.Attr{
+			slog.String("logging.googleapis.com/trace", "projects/"+h.projectID+"/traces/"+info.TraceID),
 		}
+		if info.SpanID != "" {
+			fields = append(fields, slog.String("logging.googleapis.com/spanId", info.SpanID))
+		}
+		handler = handler.WithAttrs(fields)
 	}
-	return h.inner.Handle(ctx, record)
+
+	for _, op := range h.withOps {
+		handler = op(handler)
+	}
+	return handler.Handle(ctx, record)
 }
 
 func (h *traceHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &traceHandler{inner: h.inner.WithAttrs(attrs), projectID: h.projectID}
+	if len(attrs) == 0 {
+		return h
+	}
+	return h.appended(func(inner slog.Handler) slog.Handler { return inner.WithAttrs(attrs) })
 }
 
 func (h *traceHandler) WithGroup(name string) slog.Handler {
-	return &traceHandler{inner: h.inner.WithGroup(name), projectID: h.projectID}
+	if name == "" {
+		return h
+	}
+	return h.appended(func(inner slog.Handler) slog.Handler { return inner.WithGroup(name) })
+}
+
+// appended returns a copy of h with op recorded after the existing operations.
+// The slice is copied rather than appended in place so sibling handlers derived
+// from the same parent do not share (and clobber) backing storage.
+func (h *traceHandler) appended(op func(slog.Handler) slog.Handler) *traceHandler {
+	ops := make([]func(slog.Handler) slog.Handler, len(h.withOps)+1)
+	copy(ops, h.withOps)
+	ops[len(h.withOps)] = op
+	return &traceHandler{root: h.root, projectID: h.projectID, withOps: ops}
 }

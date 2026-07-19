@@ -3,6 +3,7 @@ package slogx
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -12,7 +13,7 @@ import (
 
 func TestTraceHandlerInjectsTraceFieldsFromContext(t *testing.T) {
 	var buf bytes.Buffer
-	handler := &traceHandler{inner: slog.NewJSONHandler(&buf, nil), projectID: "olens-lv"}
+	handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "olens-lv"}
 
 	ctx := ContextWithTrace(context.Background(), "105445aa7843bc8bf206b12000100000", "0000000000000001")
 	record := slog.NewRecord(time.Date(2026, 5, 17, 12, 30, 0, 0, time.UTC), slog.LevelInfo, "instructor updated", 0)
@@ -34,7 +35,7 @@ func TestTraceHandlerInjectsTraceFieldsFromContext(t *testing.T) {
 
 func TestTraceHandlerOmitsSpanWhenAbsent(t *testing.T) {
 	var buf bytes.Buffer
-	handler := &traceHandler{inner: slog.NewJSONHandler(&buf, nil), projectID: "olens-lv"}
+	handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "olens-lv"}
 
 	ctx := ContextWithTrace(context.Background(), "105445aa7843bc8bf206b12000100000", "")
 	record := slog.NewRecord(time.Date(2026, 5, 17, 12, 30, 0, 0, time.UTC), slog.LevelInfo, "msg", 0)
@@ -54,7 +55,7 @@ func TestTraceHandlerOmitsSpanWhenAbsent(t *testing.T) {
 
 func TestTraceHandlerNoTraceInContext(t *testing.T) {
 	var buf bytes.Buffer
-	handler := &traceHandler{inner: slog.NewJSONHandler(&buf, nil), projectID: "olens-lv"}
+	handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: "olens-lv"}
 
 	record := slog.NewRecord(time.Date(2026, 5, 17, 12, 30, 0, 0, time.UTC), slog.LevelInfo, "msg", 0)
 	if err := handler.Handle(context.Background(), record); err != nil {
@@ -68,7 +69,7 @@ func TestTraceHandlerNoTraceInContext(t *testing.T) {
 
 func TestTraceHandlerEmptyProjectIDSkipsTrace(t *testing.T) {
 	var buf bytes.Buffer
-	handler := &traceHandler{inner: slog.NewJSONHandler(&buf, nil), projectID: ""}
+	handler := &traceHandler{root: slog.NewJSONHandler(&buf, nil), projectID: ""}
 
 	ctx := ContextWithTrace(context.Background(), "105445aa7843bc8bf206b12000100000", "0000000000000001")
 	record := slog.NewRecord(time.Date(2026, 5, 17, 12, 30, 0, 0, time.UTC), slog.LevelInfo, "msg", 0)
@@ -78,6 +79,81 @@ func TestTraceHandlerEmptyProjectIDSkipsTrace(t *testing.T) {
 
 	if strings.Contains(buf.String(), "logging.googleapis.com/trace") {
 		t.Fatalf("output %q contains trace field with empty project id", buf.String())
+	}
+}
+
+func TestStructuredSeverityMapping(t *testing.T) {
+	cases := []struct {
+		level slog.Level
+		want  string
+	}{
+		{slog.LevelDebug, "DEBUG"},
+		{slog.LevelInfo, "INFO"},
+		{slog.LevelWarn, "WARNING"}, // regression: slog stringifies this as "WARN"
+		{slog.LevelError, "ERROR"},
+		{LevelCritical, "CRITICAL"},
+	}
+
+	for _, tc := range cases {
+		var buf bytes.Buffer
+		// Build the handler at debug level so every case is emitted regardless of
+		// the production threshold.
+		handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+			Level:       slog.LevelDebug,
+			ReplaceAttr: replaceForCloudLogging,
+		})
+		record := slog.NewRecord(time.Date(2026, 5, 17, 12, 30, 0, 0, time.UTC), tc.level, "msg", 0)
+		if err := handler.Handle(context.Background(), record); err != nil {
+			t.Fatalf("Handle() error = %v", err)
+		}
+
+		output := buf.String()
+		if !strings.Contains(output, `"severity":"`+tc.want+`"`) {
+			t.Fatalf("level %v: output %q missing severity %q", tc.level, output, tc.want)
+		}
+		if tc.level == slog.LevelWarn && strings.Contains(output, `"severity":"WARN"`) {
+			t.Fatalf("warn level emitted the invalid Cloud Logging severity %q", "WARN")
+		}
+	}
+}
+
+func TestTraceFieldsStayTopLevelUnderGroup(t *testing.T) {
+	var buf bytes.Buffer
+	base := &traceHandler{root: newStructuredHandler(&buf), projectID: "olens-lv"}
+
+	// Log through a grouped logger, the case that used to nest the trace fields.
+	grouped := base.WithGroup("req").WithAttrs([]slog.Attr{slog.String("path", "/lv")})
+
+	ctx := ContextWithTrace(context.Background(), "105445aa7843bc8bf206b12000100000", "0000000000000001")
+	record := slog.NewRecord(time.Date(2026, 5, 17, 12, 30, 0, 0, time.UTC), slog.LevelInfo, "handled", 0)
+	record.AddAttrs(slog.String("status", "200"))
+	if err := grouped.Handle(ctx, record); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, buf.String())
+	}
+
+	// Trace/span must be top-level keys, not nested under the "req" group.
+	if entry["logging.googleapis.com/trace"] != "projects/olens-lv/traces/105445aa7843bc8bf206b12000100000" {
+		t.Fatalf("trace field not at top level: %v", entry)
+	}
+	if entry["logging.googleapis.com/spanId"] != "0000000000000001" {
+		t.Fatalf("spanId field not at top level: %v", entry)
+	}
+
+	// User attributes must still nest under the group.
+	req, ok := entry["req"].(map[string]any)
+	if !ok {
+		t.Fatalf(`"req" group missing or not an object: %v`, entry)
+	}
+	if req["path"] != "/lv" || req["status"] != "200" {
+		t.Fatalf("user attrs not nested under req group: %v", req)
+	}
+	if _, nested := req["logging.googleapis.com/trace"]; nested {
+		t.Fatalf("trace field was nested under the req group: %v", req)
 	}
 }
 

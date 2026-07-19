@@ -207,6 +207,45 @@ func TestErrorReportingKeepsFieldsTopLevelUnderGroup(t *testing.T) {
 	}
 }
 
+func TestErrorReportingComposesWithTraceCorrelation(t *testing.T) {
+	// The real Structured-mode chain (errorReportingHandler -> traceHandler ->
+	// JSON) enriching an error record that also carries a trace context: both
+	// features must apply together, all at the JSON top level. Each feature was
+	// tested in isolation; this guards their composition.
+	var buf bytes.Buffer
+	handler := newErrorReportingChain(&buf, slog.LevelError, "checkout", "v1")
+
+	ctx := ContextWithTraceInfo(context.Background(), TraceInfo{
+		TraceID: "105445aa7843bc8bf206b12000100000",
+		SpanID:  "0000000000000001",
+		Sampled: true,
+	})
+	record := recordAt(slog.LevelError, "charge failed", slog.String("order", "42"))
+	if err := handler.Handle(ctx, record); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+
+	entry := decode(t, &buf)
+	wantTopLevel := map[string]any{
+		"@type":                                reportedErrorEventType,
+		"logging.googleapis.com/trace":         "projects/olens-lv/traces/105445aa7843bc8bf206b12000100000",
+		"logging.googleapis.com/spanId":        "0000000000000001",
+		"logging.googleapis.com/trace_sampled": true,
+		"order":                                "42",
+	}
+	for key, want := range wantTopLevel {
+		if entry[key] != want {
+			t.Errorf("entry[%q] = %v, want %v", key, entry[key], want)
+		}
+	}
+	if _, ok := entry["serviceContext"].(map[string]any); !ok {
+		t.Errorf("serviceContext missing or not an object: %v", entry)
+	}
+	if _, ok := entry["stack_trace"].(string); !ok {
+		t.Errorf("stack_trace missing or not a string: %v", entry)
+	}
+}
+
 func TestErrorReportingUsesExistingStackTrace(t *testing.T) {
 	var buf bytes.Buffer
 	handler := newErrorReportingChain(&buf, slog.LevelError, "olens", "v1")

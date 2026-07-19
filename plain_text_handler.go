@@ -3,12 +3,14 @@ package slogx
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -31,11 +33,20 @@ func (c colorizer) code(color string) string {
 	return color
 }
 
+// groupedAttr is a handler attribute together with the group prefix that was
+// open when it was added, so it renders under the right group at write time.
+type groupedAttr struct {
+	prefix string
+	attr   slog.Attr
+}
+
 type plainTextHandler struct {
-	opts      slog.HandlerOptions
-	out       io.Writer
-	attrs     []slog.Attr
-	colorizer colorizer
+	opts        slog.HandlerOptions
+	out         io.Writer
+	mu          *sync.Mutex // shared across derived handlers; serializes writes
+	colorizer   colorizer
+	groupPrefix string
+	attrs       []groupedAttr
 }
 
 func newPlainTextHandler(out io.Writer, opts *slog.HandlerOptions, useColor bool) *plainTextHandler {
@@ -46,6 +57,7 @@ func newPlainTextHandler(out io.Writer, opts *slog.HandlerOptions, useColor bool
 	return &plainTextHandler{
 		opts:      *opts,
 		out:       out,
+		mu:        &sync.Mutex{},
 		colorizer: colorizer{enabled: useColor},
 	}
 }
@@ -63,17 +75,15 @@ func (h *plainTextHandler) Handle(_ context.Context, record slog.Record) error {
 	buf = record.Time.AppendFormat(buf, "2006-01-02 15:04:05.000")
 	buf = append(buf, "  "...)
 
-	levelColor := getLevelColor(record.Level)
-	buf = append(buf, h.colorizer.code(levelColor)...)
-	buf = append(buf, fmt.Sprintf("%-6s", strings.ToUpper(record.Level.String()))...)
+	buf = append(buf, h.colorizer.code(getLevelColor(record.Level))...)
+	buf = appendPadded(buf, strings.ToUpper(record.Level.String()), 6)
 	buf = append(buf, h.colorizer.code(colorReset)...)
-	buf = append(buf, " "...)
+	buf = append(buf, ' ')
 
 	if h.opts.AddSource && record.PC != 0 {
-		source := h.formatSource(record.PC)
-		if source != "" {
-			buf = append(buf, fmt.Sprintf("%-32s", source)...)
-			buf = append(buf, " "...)
+		if source := formatSource(record.PC); source != "" {
+			buf = appendPadded(buf, source, 32)
+			buf = append(buf, ' ')
 		}
 	}
 
@@ -81,82 +91,98 @@ func (h *plainTextHandler) Handle(_ context.Context, record slog.Record) error {
 	buf = h.appendAttributes(buf, record)
 	buf = append(buf, '\n')
 
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	_, err := h.out.Write(buf)
 	return err
 }
 
 func (h *plainTextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	newAttrs := make([]slog.Attr, len(h.attrs)+len(attrs))
+	if len(attrs) == 0 {
+		return h
+	}
+
+	newAttrs := make([]groupedAttr, len(h.attrs), len(h.attrs)+len(attrs))
 	copy(newAttrs, h.attrs)
-	copy(newAttrs[len(h.attrs):], attrs)
-
-	return &plainTextHandler{
-		opts:      h.opts,
-		out:       h.out,
-		attrs:     newAttrs,
-		colorizer: h.colorizer,
-	}
-}
-
-func (h *plainTextHandler) WithGroup(_ string) slog.Handler {
-	return h
-}
-
-func (h *plainTextHandler) formatSource(pc uintptr) string {
-	frame, _ := runtime.CallersFrames([]uintptr{pc}).Next()
-	if frame.File == "" {
-		return ""
+	for _, attr := range attrs {
+		newAttrs = append(newAttrs, groupedAttr{prefix: h.groupPrefix, attr: attr})
 	}
 
-	return fmt.Sprintf("[%s/%s:%d]", shortDir(frame.File), filepath.Base(frame.File), frame.Line)
+	clone := *h
+	clone.attrs = newAttrs
+	return &clone
 }
 
+func (h *plainTextHandler) WithGroup(name string) slog.Handler {
+	if name == "" {
+		return h
+	}
+
+	clone := *h
+	clone.groupPrefix = h.groupPrefix + name + "."
+	return &clone
+}
+
+// appendAttributes renders the handler's stored attributes followed by the
+// record's per-call attributes (matching the ordering of slog's built-in
+// handlers), each namespaced by the group that was open when it was added.
 func (h *plainTextHandler) appendAttributes(buf []byte, record slog.Record) []byte {
-	if !h.hasAnyAttributes(record) {
+	if len(h.attrs) == 0 && record.NumAttrs() == 0 {
 		return buf
 	}
 
+	start := len(buf)
 	first := true
-	buf = append(buf, " "...)
+	buf = append(buf, ' ')
 	buf = append(buf, h.colorizer.code(colorDimGray)...)
 	buf = append(buf, "{ "...)
 	buf = append(buf, h.colorizer.code(colorReset)...)
 
+	for _, ga := range h.attrs {
+		buf = h.appendAttr(buf, ga.prefix, ga.attr, &first)
+	}
 	record.Attrs(func(attr slog.Attr) bool {
 		if attr.Key != slog.SourceKey {
-			buf = h.appendAttribute(buf, attr, &first)
+			buf = h.appendAttr(buf, h.groupPrefix, attr, &first)
 		}
 		return true
 	})
 
-	for _, attr := range h.attrs {
-		buf = h.appendAttribute(buf, attr, &first)
+	// Everything resolved to nothing (e.g. only empty groups): drop the braces.
+	if first {
+		return buf[:start]
 	}
 
 	buf = append(buf, h.colorizer.code(colorDimGray)...)
 	buf = append(buf, " }"...)
 	buf = append(buf, h.colorizer.code(colorReset)...)
-
 	return buf
 }
 
-func (h *plainTextHandler) hasAnyAttributes(record slog.Record) bool {
-	if len(h.attrs) > 0 {
-		return true
+// appendAttr renders a single attribute under prefix. Group values are flattened
+// with dotted key prefixes; empty groups and empty-key attributes are dropped,
+// following slog's semantics.
+func (h *plainTextHandler) appendAttr(buf []byte, prefix string, attr slog.Attr, first *bool) []byte {
+	attr.Value = attr.Value.Resolve()
+
+	if attr.Value.Kind() == slog.KindGroup {
+		groupAttrs := attr.Value.Group()
+		if len(groupAttrs) == 0 {
+			return buf
+		}
+		if attr.Key != "" {
+			prefix += attr.Key + "."
+		}
+		for _, ga := range groupAttrs {
+			buf = h.appendAttr(buf, prefix, ga, first)
+		}
+		return buf
 	}
 
-	hasAttrs := false
-	record.Attrs(func(attr slog.Attr) bool {
-		if attr.Key != slog.SourceKey {
-			hasAttrs = true
-			return false
-		}
-		return true
-	})
-	return hasAttrs
-}
+	if attr.Key == "" {
+		return buf
+	}
 
-func (h *plainTextHandler) appendAttribute(buf []byte, attr slog.Attr, first *bool) []byte {
 	if !*first {
 		buf = append(buf, h.colorizer.code(colorDimGray)...)
 		buf = append(buf, ", "...)
@@ -168,18 +194,19 @@ func (h *plainTextHandler) appendAttribute(buf []byte, attr slog.Attr, first *bo
 	buf = append(buf, '"')
 	buf = append(buf, h.colorizer.code(colorReset)...)
 	buf = append(buf, h.colorizer.code(colorCyan)...)
+	buf = append(buf, prefix...)
 	buf = append(buf, attr.Key...)
 	buf = append(buf, h.colorizer.code(colorReset)...)
 
 	value, quote := formatAttrValue(attr.Value)
 	buf = append(buf, h.colorizer.code(colorDimGray)...)
+	buf = append(buf, "\": "...)
+	buf = append(buf, h.colorizer.code(colorReset)...)
 	if quote {
-		buf = append(buf, "\": \""...)
-		buf = append(buf, value...)
-		buf = append(buf, '"')
+		// strconv.AppendQuote wraps the value in quotes and escapes embedded
+		// quotes, newlines and control characters, keeping each entry on one line.
+		buf = strconv.AppendQuote(buf, value)
 	} else {
-		buf = append(buf, "\": "...)
-		buf = append(buf, h.colorizer.code(colorReset)...)
 		buf = append(buf, value...)
 	}
 	buf = append(buf, h.colorizer.code(colorReset)...)
@@ -200,6 +227,33 @@ func formatAttrValue(value slog.Value) (string, bool) {
 	}
 
 	return value.String(), true
+}
+
+// appendPadded appends s left-aligned in a field of the given width, padding
+// with spaces. Longer strings are not truncated (matching fmt's "%-Ns").
+func appendPadded(buf []byte, s string, width int) []byte {
+	buf = append(buf, s...)
+	for i := len(s); i < width; i++ {
+		buf = append(buf, ' ')
+	}
+	return buf
+}
+
+func formatSource(pc uintptr) string {
+	frame, _ := runtime.CallersFrames([]uintptr{pc}).Next()
+	if frame.File == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteByte('[')
+	b.WriteString(shortDir(frame.File))
+	b.WriteByte('/')
+	b.WriteString(filepath.Base(frame.File))
+	b.WriteByte(':')
+	b.WriteString(strconv.Itoa(frame.Line))
+	b.WriteByte(']')
+	return b.String()
 }
 
 func shortDir(file string) string {
@@ -228,4 +282,15 @@ func getLevelColor(level slog.Level) string {
 	default:
 		return colorGray
 	}
+}
+
+// isTerminal reports whether f is a character device (a terminal), used to
+// decide whether ANSI color is appropriate. It stays dependency-free by
+// inspecting the file mode rather than pulling in golang.org/x/term.
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }

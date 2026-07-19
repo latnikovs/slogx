@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -243,11 +244,83 @@ func TestPlainTextHandlerHandlesRecordsWithoutAttributes(t *testing.T) {
 	}
 }
 
-func TestPlainTextHandlerWithGroupReturnsSameHandler(t *testing.T) {
-	handler := newPlainTextHandler(&bytes.Buffer{}, nil, false)
+func TestPlainTextHandlerWithGroupNamespacesAttributes(t *testing.T) {
+	var buf bytes.Buffer
+	base := newPlainTextHandler(&buf, nil, false)
 
-	if got := handler.WithGroup("group"); got != handler {
-		t.Fatal("WithGroup() returned a different handler")
+	// Attrs added after WithGroup, and per-call record attrs, both nest under the
+	// open group; a nested group and a slog.Group value extend the prefix.
+	handler := base.WithGroup("db").WithAttrs([]slog.Attr{slog.String("host", "primary")})
+	record := slog.NewRecord(time.Date(2026, 5, 17, 12, 30, 0, 0, time.UTC), slog.LevelInfo, "query", 0)
+	record.AddAttrs(
+		slog.String("rows", "5"),
+		slog.Group("cache", slog.String("hit", "true")),
+	)
+
+	if err := handler.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+
+	output := buf.String()
+	for _, want := range []string{
+		`"db.host": "primary"`,   // handler attr under db
+		`"db.rows": "5"`,         // record attr under the open db group
+		`"db.cache.hit": "true"`, // slog.Group value flattened with dotted prefix
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output %q does not contain %q", output, want)
+		}
+	}
+}
+
+func TestPlainTextHandlerEscapesQuotedValues(t *testing.T) {
+	var buf bytes.Buffer
+	handler := newPlainTextHandler(&buf, nil, false)
+	record := slog.NewRecord(time.Date(2026, 5, 17, 12, 30, 0, 0, time.UTC), slog.LevelInfo, "msg", 0)
+	record.AddAttrs(slog.Any("error", errors.New("bad \"input\"\nsecond line")))
+
+	if err := handler.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+
+	output := buf.String()
+	// The embedded newline must be escaped, keeping the entry on a single line.
+	if strings.Count(output, "\n") != 1 {
+		t.Fatalf("value newline not escaped, output spans multiple lines: %q", output)
+	}
+	// Embedded quotes must be escaped rather than breaking the surrounding quotes.
+	if !strings.Contains(output, `bad \"input\"`) {
+		t.Fatalf("embedded quotes not escaped: %q", output)
+	}
+}
+
+func TestPlainTextHandlerAttributeOrder(t *testing.T) {
+	var buf bytes.Buffer
+	handler := newPlainTextHandler(&buf, nil, false).
+		WithAttrs([]slog.Attr{slog.String("scope", "admin")})
+	record := slog.NewRecord(time.Date(2026, 5, 17, 12, 30, 0, 0, time.UTC), slog.LevelInfo, "msg", 0)
+	record.AddAttrs(slog.String("email", "x"))
+
+	if err := handler.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+
+	output := buf.String()
+	// Handler (context) attrs precede per-call attrs, like slog's built-ins.
+	if strings.Index(output, "scope") > strings.Index(output, "email") {
+		t.Fatalf("handler attr should precede record attr: %q", output)
+	}
+}
+
+func TestIsTerminalFalseForRegularFile(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "log")
+	if err != nil {
+		t.Fatalf("CreateTemp() error = %v", err)
+	}
+	defer f.Close()
+
+	if isTerminal(f) {
+		t.Fatal("regular file reported as a terminal")
 	}
 }
 

@@ -1,0 +1,52 @@
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+commitish: main
+categories:
+  - title: 'Features'
+    semver-increment: minor
+    when:
+      labels:
+        - 'feature'
+  - title: 'Bug Fixes'
+    semver-increment: patch
+    when:
+      labels:
+        - 'fix'
+  - title: 'Documentation'
+    when:
+      labels:
+        - 'docs'
+  - title: 'Maintenance'
+    collapse-after: 5
+    when:
+      labels:
+        - 'chore'
+        - 'refactor'
+  - type: version-resolver
+    semver-increment: major
+    when:
+      labels:
+        - 'breaking change'
+
+change-template: '- $TITLE [#$NUMBER]($URL) by @$AUTHOR'
+template: |
+  ## What's Changed
+
+  $CHANGES
+
+autolabeler:
+  - label: 'feature'
+    title:
+      - "/^feat/i"
+  - label: 'fix'
+    title:
+      - "/^fix/i"
+      - "/^bug/i"
+  - label: 'chore'
+    title:
+      - "/^ci/i"
+      - "/^chore/i"
+      - "/^refactor/i"
+  - label: 'docs'
+    title:
+      - "/^docs/i"

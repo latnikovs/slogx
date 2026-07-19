@@ -78,7 +78,7 @@ func Setup(mode Mode, projectID string) {
 		slog.SetDefault(slog.New(newPlainTextHandler(os.Stdout, &slog.HandlerOptions{
 			AddSource: true,
 			Level:     slog.LevelDebug,
-		}, true)))
+		}, isTerminal(os.Stdout))))
 	default:
 		slog.SetDefault(slog.New(&traceHandler{root: newStructuredHandler(os.Stdout), projectID: projectID}))
 	}

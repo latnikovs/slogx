@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # slogx itself has no third-party dependencies, so gomod only watches the Go
+  # toolchain directive. Kept here so any future dependency is picked up too.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore

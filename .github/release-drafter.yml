@@ -11,7 +11,8 @@ categories:
     semver-increment: patch
     when:
       labels:
-        - 'fix'
+        - 'fix' # autolabeler / manual
+        - 'bug' # applied by the ship workflow
   - title: 'Documentation'
     when:
       labels:
